@@ -1,0 +1,307 @@
+TITULO	TIPO	BD	CONSULTA
+INTRODUCCION	text		
+
+Este módulo permite realizar un análisis de incidencia y coste-efectividad a partir de datos clínicos en OMOP CDM, comparando un periodo control (pre-vacunación) con un periodo intervención (post-vacunación).
+
+
+
+Que hace este modulo:
+
+
+Selecciona la cohorte de pacientes según criterios clínicos de inclusión.
+
+Organiza los casos por temporadas epidemiológicas.
+
+Incorpora una población de referencia para calcular tasas normalizadas por 1000 habitantes.
+
+Recupera eventos de urgencias e ingresos en la cohorte.
+
+Asigna costes a cada evento hospitalario.
+
+Calcula incidencia, costes, efectividad e Índice de Costo-Efectividad Incremental (ICER).
+
+
+
+Resultado:
+
+
+El módulo permite estimar si la intervención se asocia a una reducción de eventos hospitalarios y a un ahorro económico, expresado como ahorro en euros por evento evitado.
+
+INCLUSION	variable	OMOP	SELECT
+p.person_id,
+c.condition_start_datetime
+FROM public.condition_occurrence c
+INNER JOIN public.person p
+ON p.person_id = c.person_id
+WHERE c.condition_concept_id IN (437222, 436145, 4110484, 254058)
+AND ((c.condition_start_datetime BETWEEN TIMESTAMP '2018-10-01 00:00:00'AND TIMESTAMP '2019-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2019-10-01 00:00:00'AND TIMESTAMP '2020-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2020-10-01 00:00:00'AND TIMESTAMP '2021-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2021-10-01 00:00:00'AND TIMESTAMP '2022-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2022-10-01 00:00:00'AND TIMESTAMP '2023-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2023-10-01 00:00:00'AND TIMESTAMP '2024-01-31 23:59:59') OR
+(c.condition_start_datetime BETWEEN TIMESTAMP '2024-10-01 00:00:00'AND TIMESTAMP '2025-01-31 23:59:59'))
+
+/*
+AND (
+( c.condition_start_datetime < p.birth_datetime + INTERVAL '100 year')
+
+-- *********************************
+-- SOLO PARA BALEARES
+--********************************
+-- OR (EXTRACT(YEAR FROM c.condition_start_datetime) <= p.year_of_birth + 1)
+
+
+)
+*/
+
+LISTAPACIENTES	variable	OMOP	SELECT
+string_agg(
+DISTINCT quote_literal(person_id),
+', '
+) AS lista
+-- count(distinct person_id)
+from (select #INCLUSION#) t
+TEMPORADAS	variable	OMOP	SELECT
+temporada,
+COUNT(DISTINCT person_id) AS n_personas
+FROM (
+SELECT
+person_id,
+CASE
+WHEN condition_start_ts BETWEEN TIMESTAMP '2018-10-01 00:00:00'
+AND TIMESTAMP '2019-01-31 23:59:59'
+THEN '2018-2019'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2019-10-01 00:00:00'
+AND TIMESTAMP '2020-01-31 23:59:59'
+THEN '2019-2020'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2020-10-01 00:00:00'
+AND TIMESTAMP '2021-01-31 23:59:59'
+THEN '2020-2021'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2021-10-01 00:00:00'
+AND TIMESTAMP '2022-01-31 23:59:59'
+THEN '2021-2022'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2022-10-01 00:00:00'
+AND TIMESTAMP '2023-01-31 23:59:59'
+THEN '2022-2023'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2023-10-01 00:00:00'
+AND TIMESTAMP '2024-01-31 23:59:59'
+THEN '2023-2024'
+
+WHEN condition_start_ts BETWEEN TIMESTAMP '2024-10-01 00:00:00'
+AND TIMESTAMP '2025-01-31 23:59:59'
+THEN '2024-2025'
+
+END AS temporada
+FROM (
+SELECT
+person_id,
+condition_start_datetime::timestamp AS condition_start_ts
+FROM (
+SELECT #INCLUSION#
+) base
+) t1
+) t2
+WHERE temporada IS NOT NULL
+GROUP BY temporada
+ORDER BY temporada;
+-840	variable	OMOP	SELECT
+temporada,
+referencia
+FROM (
+VALUES
+('2018-2019', 3360),
+('2019-2020', 3152),
+('2020-2021', 2548),
+('2021-2022', 2788),
+('2022-2023', 2894),
+('2023-2024', 2833),
+('2024-2025', 2648)
+) AS t(temporada, referencia)
+ORDER BY temporada;
+INCIDENCIA	table	OMOP	select
+t.temporada,
+t.n_personas,
+p.referencia,
+-- incidencia por 1000 personas
+ROUND((t.n_personas::numeric / p.referencia::numeric) * 1000, 2) AS incidencia_x_1000
+from (select #TEMPORADAS#) t
+inner join (select #POBREFERENCIA#) p
+on p.temporada = t.temporada
+INGRESOS	variable	OMOP	select * from public.visit_occurrence
+where person_id IN (SELECT
+person_id
+FROM public.condition_occurrence c
+WHERE c.condition_concept_id IN (437222, 436145, 4110484, 254058) )
+and visit_concept_id IN (9201,9203)
+
+-- SOLO PARA HUVM
+and visit_source_value <> 'Inpatient Visit COND'
+and visit_source_value <> 'Emergency Room Visit COND'
+and visit_source_value <> 'Radiology Clinic/Center'
+and visit_source_value <> 'Laboratory Visit'
+and visit_source_value <> 'Pharmacy visit'
+and visit_source_value <> 'Health examination'
+and ((visit_start_date BETWEEN '2023-10-01' AND '2024-01-31') OR (visit_start_date BETWEEN '2024-10-01' AND '2025-01-31')
+OR (visit_start_date BETWEEN '2022-10-01' AND '2023-01-31')
+OR (visit_start_date BETWEEN '2021-10-01' AND '2022-01-31')
+OR (visit_start_date BETWEEN '2020-10-01' AND '2021-01-31')
+OR (visit_start_date BETWEEN '2019-10-01' AND '2020-01-31')
+OR (visit_start_date BETWEEN '2018-10-01' AND '2019-01-31'))
+COSTES	table	OMOP	SELECT
+CASE
+WHEN r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023') THEN 'control'
+WHEN r.temporada IN ('2023-2024','2024-2025') THEN 'intervencion'
+END AS periodo,
+COUNT(*) AS n_temporadas,
+SUM(r.n_personas) AS n_pacientes,
+SUM(r.referencia) AS pob_total_referencia,
+SUM(r.n_urgencias) AS total_urgencias,
+SUM(r.n_ingresos) AS total_ingresos,
+ROUND(SUM(r.coste_total_euros),2) AS coste_total,
+ROUND(SUM(r.coste_total_euros)/NULLIF(SUM(r.n_personas),0),2) AS coste_medio_paciente,
+ROUND(SUM(r.coste_total_euros)*1000/NULLIF(SUM(r.referencia),0),2) AS coste_x_1000,
+ROUND(SUM(r.n_urgencias)*1000/NULLIF(SUM(r.referencia),0),2) AS urgencias_x_1000,
+ROUND(SUM(r.n_ingresos)*1000/NULLIF(SUM(r.referencia),0),2) AS ingresos_x_1000,
+ROUND((SUM(r.n_urgencias)+SUM(r.n_ingresos))*1000/NULLIF(SUM(r.referencia),0),2) AS eventos_hospitalarios_x_1000
+FROM (
+SELECT
+t.temporada,
+COALESCE(NULLIF(t.n_personas,'')::numeric,0) AS n_personas,
+COALESCE(NULLIF(p.referencia,'null')::numeric,0) AS referencia,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int=9203 THEN i.visit_occurrence_id END),0) AS n_urgencias,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int=9201 THEN i.visit_occurrence_id END),0) AS n_ingresos,
+ROUND(COALESCE(SUM(CASE WHEN i.visit_concept_id::int=9201 THEN 771.43 WHEN i.visit_concept_id::int=9203 THEN 208.47 ELSE 0 END)::numeric,0),2) AS coste_total_euros
+FROM (SELECT #TEMPORADAS#) t
+LEFT JOIN (SELECT #POBREFERENCIA#) p ON t.temporada=p.temporada
+LEFT JOIN (
+SELECT
+CASE
+WHEN visit_start_date::date BETWEEN DATE '2018-10-01' AND DATE '2019-01-31' THEN '2018-2019'
+WHEN visit_start_date::date BETWEEN DATE '2019-10-01' AND DATE '2020-01-31' THEN '2019-2020'
+WHEN visit_start_date::date BETWEEN DATE '2020-10-01' AND DATE '2021-01-31' THEN '2020-2021'
+WHEN visit_start_date::date BETWEEN DATE '2021-10-01' AND DATE '2022-01-31' THEN '2021-2022'
+WHEN visit_start_date::date BETWEEN DATE '2022-10-01' AND DATE '2023-01-31' THEN '2022-2023'
+WHEN visit_start_date::date BETWEEN DATE '2023-10-01' AND DATE '2024-01-31' THEN '2023-2024'
+WHEN visit_start_date::date BETWEEN DATE '2024-10-01' AND DATE '2025-01-31' THEN '2024-2025'
+END AS temporada,
+visit_occurrence_id,
+visit_concept_id
+FROM (SELECT #INGRESOS#) x
+WHERE visit_concept_id::int IN (9201,9203)
+) i ON t.temporada=i.temporada
+GROUP BY t.temporada,t.n_personas,p.referencia
+) r
+WHERE r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023','2023-2024','2024-2025')
+GROUP BY 1
+ORDER BY 1;
+EFECTIVIDAD	table	OMOP	WITH resumen_periodos AS (
+SELECT
+CASE
+WHEN r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023') THEN 'control'
+WHEN r.temporada IN ('2023-2024','2024-2025') THEN 'intervencion'
+END AS periodo,
+ROUND(SUM(r.n_urgencias) * 1000 / NULLIF(SUM(r.referencia), 0), 2) AS urgencias_x_1000,
+ROUND(SUM(r.n_ingresos) * 1000 / NULLIF(SUM(r.referencia), 0), 2) AS ingresos_x_1000,
+ROUND((SUM(r.n_urgencias) + SUM(r.n_ingresos)) * 1000 / NULLIF(SUM(r.referencia), 0), 2) AS eventos_hospitalarios_x_1000
+FROM (
+SELECT
+t.temporada,
+COALESCE(NULLIF(t.n_personas, '')::numeric, 0) AS n_personas,
+COALESCE(NULLIF(p.referencia, 'null')::numeric, 0) AS referencia,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int = 9203 THEN i.visit_occurrence_id END), 0) AS n_urgencias,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int = 9201 THEN i.visit_occurrence_id END), 0) AS n_ingresos
+FROM (SELECT #TEMPORADAS#) t
+LEFT JOIN (SELECT #POBREFERENCIA#) p ON t.temporada = p.temporada
+LEFT JOIN (
+SELECT
+CASE
+WHEN visit_start_date::date BETWEEN DATE '2018-10-01' AND DATE '2019-01-31' THEN '2018-2019'
+WHEN visit_start_date::date BETWEEN DATE '2019-10-01' AND DATE '2020-01-31' THEN '2019-2020'
+WHEN visit_start_date::date BETWEEN DATE '2020-10-01' AND DATE '2021-01-31' THEN '2020-2021'
+WHEN visit_start_date::date BETWEEN DATE '2021-10-01' AND DATE '2022-01-31' THEN '2021-2022'
+WHEN visit_start_date::date BETWEEN DATE '2022-10-01' AND DATE '2023-01-31' THEN '2022-2023'
+WHEN visit_start_date::date BETWEEN DATE '2023-10-01' AND DATE '2024-01-31' THEN '2023-2024'
+WHEN visit_start_date::date BETWEEN DATE '2024-10-01' AND DATE '2025-01-31' THEN '2024-2025'
+END AS temporada,
+visit_occurrence_id,
+visit_concept_id
+FROM (SELECT #INGRESOS#) x
+WHERE visit_concept_id::int IN (9201, 9203)
+) i ON t.temporada = i.temporada
+GROUP BY t.temporada, t.n_personas, p.referencia
+) r
+WHERE r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023','2023-2024','2024-2025')
+GROUP BY 1
+)
+SELECT
+ROUND(MAX(CASE WHEN periodo = 'control' THEN urgencias_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN urgencias_x_1000 END), 2) AS diferencia_urgencias_x_1000,
+ROUND(MAX(CASE WHEN periodo = 'control' THEN ingresos_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN ingresos_x_1000 END), 2) AS diferencia_ingresos_x_1000,
+ROUND(MAX(CASE WHEN periodo = 'control' THEN eventos_hospitalarios_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN eventos_hospitalarios_x_1000 END), 2) AS diferencia_eventos_hospitalarios_x_1000,
+ROUND(
+(MAX(CASE WHEN periodo = 'control' THEN eventos_hospitalarios_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN eventos_hospitalarios_x_1000 END)) * 100.0
+/ NULLIF(MAX(CASE WHEN periodo = 'control' THEN eventos_hospitalarios_x_1000 END), 0),
+2
+) AS reduccion_relativa_eventos_pct
+FROM resumen_periodos;
+ICER	table	OMOP	WITH resumen_periodos AS (
+SELECT
+CASE
+WHEN r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023') THEN 'control'
+WHEN r.temporada IN ('2023-2024','2024-2025') THEN 'intervencion'
+END AS periodo,
+ROUND(SUM(r.coste_total_euros) * 1000 / NULLIF(SUM(r.referencia), 0), 2) AS coste_x_1000,
+ROUND((SUM(r.n_urgencias) + SUM(r.n_ingresos)) * 1000 / NULLIF(SUM(r.referencia), 0), 2) AS eventos_hospitalarios_x_1000
+FROM (
+SELECT
+t.temporada,
+COALESCE(NULLIF(t.n_personas, '')::numeric, 0) AS n_personas,
+COALESCE(NULLIF(p.referencia, 'null')::numeric, 0) AS referencia,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int = 9203 THEN i.visit_occurrence_id END), 0) AS n_urgencias,
+COALESCE(COUNT(DISTINCT CASE WHEN i.visit_concept_id::int = 9201 THEN i.visit_occurrence_id END), 0) AS n_ingresos,
+ROUND(
+COALESCE(SUM(CASE
+WHEN i.visit_concept_id::int = 9201 THEN 771.43
+WHEN i.visit_concept_id::int = 9203 THEN 208.47
+ELSE 0
+END)::numeric, 0),
+2
+) AS coste_total_euros
+FROM (SELECT #TEMPORADAS#) t
+LEFT JOIN (SELECT #POBREFERENCIA#) p ON t.temporada = p.temporada
+LEFT JOIN (
+SELECT
+CASE
+WHEN visit_start_date::date BETWEEN DATE '2018-10-01' AND DATE '2019-01-31' THEN '2018-2019'
+WHEN visit_start_date::date BETWEEN DATE '2019-10-01' AND DATE '2020-01-31' THEN '2019-2020'
+WHEN visit_start_date::date BETWEEN DATE '2020-10-01' AND DATE '2021-01-31' THEN '2020-2021'
+WHEN visit_start_date::date BETWEEN DATE '2021-10-01' AND DATE '2022-01-31' THEN '2021-2022'
+WHEN visit_start_date::date BETWEEN DATE '2022-10-01' AND DATE '2023-01-31' THEN '2022-2023'
+WHEN visit_start_date::date BETWEEN DATE '2023-10-01' AND DATE '2024-01-31' THEN '2023-2024'
+WHEN visit_start_date::date BETWEEN DATE '2024-10-01' AND DATE '2025-01-31' THEN '2024-2025'
+END AS temporada,
+visit_occurrence_id,
+visit_concept_id
+FROM (SELECT #INGRESOS#) x
+WHERE visit_concept_id::int IN (9201, 9203)
+) i ON t.temporada = i.temporada
+GROUP BY t.temporada, t.n_personas, p.referencia
+) r
+WHERE r.temporada IN ('2018-2019','2019-2020','2020-2021','2021-2022','2022-2023','2023-2024','2024-2025')
+GROUP BY 1
+),
+icer AS (
+SELECT
+ROUND(MAX(CASE WHEN periodo = 'control' THEN coste_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN coste_x_1000 END), 2) AS ahorro_tasa_coste_x_1000,
+ROUND(MAX(CASE WHEN periodo = 'control' THEN eventos_hospitalarios_x_1000 END) - MAX(CASE WHEN periodo = 'intervencion' THEN eventos_hospitalarios_x_1000 END), 2) AS reduccion_tasa_eventos_hospitalarios_x_1000
+FROM resumen_periodos
+)
+SELECT
+ahorro_tasa_coste_x_1000,
+ROUND(ahorro_tasa_coste_x_1000 / NULLIF(reduccion_tasa_eventos_hospitalarios_x_1000, 0), 2) AS ahorro_euros_x_evento
+FROM icer;
